@@ -334,7 +334,7 @@ pub enum Event {
     HostReshared,
     Reshared,
     Rejoined,
-    RefreshInlayHints,
+    RefreshInlayHints(LanguageServerId),
     RefreshCodeLens,
     RevealInProjectPanel(ProjectEntryId),
     SnippetEdit(BufferId, Vec<(lsp::Range, Snippet)>),
@@ -2969,7 +2969,9 @@ impl Project {
                     return;
                 };
             }
-            LspStoreEvent::RefreshInlayHints => cx.emit(Event::RefreshInlayHints),
+            LspStoreEvent::RefreshInlayHints(server_id) => {
+                cx.emit(Event::RefreshInlayHints(*server_id))
+            }
             LspStoreEvent::RefreshCodeLens => cx.emit(Event::RefreshCodeLens),
             LspStoreEvent::LanguageServerPrompt(prompt) => {
                 cx.emit(Event::LanguageServerPrompt(prompt.clone()))
