@@ -1156,7 +1156,6 @@ impl InlaySnapshot {
             buffer_range,
             language_aware,
             highlights.text_highlights,
-            highlights.bracket_highlights,
             &self.buffer,
         );
 
