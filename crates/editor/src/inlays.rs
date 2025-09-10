@@ -3,7 +3,7 @@ pub mod inlay_hints;
 
 use std::any::TypeId;
 
-use gpui::{App, Context, HighlightStyle, Hsla, Rgba, Task};
+use gpui::{Context, HighlightStyle, Hsla, Rgba, Task};
 use multi_buffer::Anchor;
 use text::Rope;
 
