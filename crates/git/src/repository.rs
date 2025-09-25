@@ -24,7 +24,7 @@ use std::{
 };
 use sum_tree::MapSeekTarget;
 use thiserror::Error;
-use util::command::{new_smol_command, new_std_command};
+use util::command::new_smol_command;
 use util::paths::PathStyle;
 use util::rel_path::RelPath;
 use util::{ResultExt, paths};
@@ -643,7 +643,7 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let working_directory = working_directory?;
-                let output = new_std_command("git")
+                let output = new_smol_command("git")
                     .current_dir(&working_directory)
                     .args([
                         "--no-optional-locks",
@@ -652,7 +652,8 @@ impl GitRepository for RealGitRepository {
                         "--format=%H%x00%B%x00%at%x00%ae%x00%an%x00",
                         &commit,
                     ])
-                    .output()?;
+                    .output()
+                    .await?;
                 let output = std::str::from_utf8(&output.stdout)?;
                 let fields = output.split('\0').collect::<Vec<_>>();
                 if fields.len() != 6 {
@@ -680,7 +681,7 @@ impl GitRepository for RealGitRepository {
             return future::ready(Err(anyhow!("no working directory"))).boxed();
         };
         cx.background_spawn(async move {
-            let show_output = util::command::new_std_command("git")
+            let show_output = util::command::new_smol_command("git")
                 .current_dir(&working_directory)
                 .args([
                     "--no-optional-locks",
@@ -695,6 +696,7 @@ impl GitRepository for RealGitRepository {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
+                .await
                 .context("starting git show process")?;
 
             let show_stdout = String::from_utf8_lossy(&show_output.stdout);
@@ -1035,10 +1037,11 @@ impl GitRepository for RealGitRepository {
         let args = git_status_args(path_prefixes);
         log::debug!("Checking for git status in {path_prefixes:?}");
         self.executor.spawn(async move {
-            let output = new_std_command(&git_binary_path)
+            let output = new_smol_command(&git_binary_path)
                 .current_dir(working_directory)
                 .args(args)
-                .output()?;
+                .output()
+                .await?;
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 stdout.parse()
@@ -1054,10 +1057,11 @@ impl GitRepository for RealGitRepository {
         let working_directory = self.working_directory();
         self.executor
             .spawn(async move {
-                let output = new_std_command(&git_binary_path)
+                let output = new_smol_command(&git_binary_path)
                     .current_dir(working_directory?)
                     .args(&["stash", "list", "--pretty=format:%gd%x00%H%x00%ct%x00%s"])
-                    .output()?;
+                    .output()
+                    .await?;
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     stdout.parse()
