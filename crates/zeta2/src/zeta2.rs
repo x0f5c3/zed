@@ -133,13 +133,8 @@ impl CurrentEditPrediction {
 /// A prediction from the perspective of a buffer.
 #[derive(Debug)]
 enum BufferEditPrediction<'a> {
-    Local {
-        prediction: &'a EditPrediction,
-    },
-    Jump {
-        path: Arc<Path>,
-        cursor_position: language::Anchor,
-    },
+    Local { prediction: &'a EditPrediction },
+    Jump { path: Arc<Path>, offset: usize },
 }
 
 impl BufferEditPrediction<'_> {
@@ -380,7 +375,7 @@ impl Zeta {
             } else {
                 Some(BufferEditPrediction::Jump {
                     path: prediction.path.clone(),
-                    cursor_position: prediction.edits.first()?.0.start,
+                    offset: prediction.edits.first()?.0.start,
                 })
             }
         } else if prediction.targets_buffer(buffer, cx) {
@@ -591,14 +586,7 @@ impl Zeta {
                         .ok();
                 }
 
-                let (response, usage) = response?;
-                // TODO only allow cloud to return one path
-                let Some(path) = response.edits.first().map(|e| e.path.clone()) else {
-                    return Ok(None);
-                };
-                let edits = edits_from_response(&response.edits, &snapshot);
-
-                anyhow::Ok(Some((response.request_id, path, edits, usage)))
+                anyhow::Ok(Some(response?))
             }
         });
 
@@ -606,7 +594,7 @@ impl Zeta {
 
         cx.spawn(async move |this, cx| {
             match request_task.await {
-                Ok(Some((id, path, edits, usage))) => {
+                Ok(Some((response, usage))) => {
                     if let Some(usage) = usage {
                         this.update(cx, |this, cx| {
                             this.user_store.update(cx, |user_store, cx| {
@@ -616,25 +604,21 @@ impl Zeta {
                         .ok();
                     }
 
-                    // TODO telemetry: duration, etc
-                    let Some((edits, snapshot, edit_preview_task)) =
-                        buffer.read_with(cx, |buffer, cx| {
-                            let new_snapshot = buffer.snapshot();
-                            let edits: Arc<[_]> =
-                                interpolate_edits(&snapshot, &new_snapshot, edits)?.into();
-                            Some((edits.clone(), new_snapshot, buffer.preview_edits(edits, cx)))
-                        })?
-                    else {
-                        return Ok(None);
-                    };
+                    let prediction =
+                        if let Some(prediction) = EditPrediction::from_response(response) {
+                            if prediction.targets_buffer_async(&buffer, cx)? {
+                                // todo! maybe we can combine these into a single function?
+                                // not sure how we will use upgrade elsewhere yet
+                                prediction.upgrade(&snapshot, &buffer, cx).await?
+                            } else {
+                                Some(prediction)
+                            }
+                        } else {
+                            None
+                        };
 
-                    Ok(Some(EditPrediction {
-                        id: id.into(),
-                        edits,
-                        snapshot,
-                        path,
-                        edit_preview: edit_preview_task.await,
-                    }))
+                    // TODO telemetry: duration, etc
+                    Ok(prediction)
                 }
                 Ok(None) => Ok(None),
                 Err(err) => {

@@ -1,54 +1,135 @@
 use std::{borrow::Cow, ops::Range, path::Path, sync::Arc};
 
+use anyhow::Result;
 use cloud_llm_client::predict_edits_v3;
-use gpui::{App, Entity};
+use gpui::{App, AppContext, AsyncApp, Entity, Task};
 use language::{
     Anchor, Buffer, BufferSnapshot, EditPreview, OffsetRangeExt, TextBufferSnapshot, text_diff,
 };
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct EditPrediction {
     pub id: EditPredictionId,
     pub path: Arc<Path>,
-    pub edits: Arc<[(Range<Anchor>, String)]>,
-    pub snapshot: BufferSnapshot,
-    pub edit_preview: EditPreview,
+    state: EditPredictionState,
 }
 
-impl std::fmt::Debug for EditPrediction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EditPrediction")
-            .field("id", &self.id)
-            .field("path", &self.path)
-            .field("edits", &self.edits)
-            .field("snapshot", &"<snapshot>")
-            .field("edit_preview", &"<preview>")
-            .finish()
-    }
+#[derive(Clone)]
+enum EditPredictionState {
+    /// The target file hasn't been loaded yet, so we only have offsets
+    Pending { edits: Vec<predict_edits_v3::Edit> },
+    /// The target file has been loaded, so we have anchors
+    Ready {
+        edits: Arc<[(Range<Anchor>, String)]>,
+        snapshot: TextBufferSnapshot,
+        edit_preview: EditPreview,
+    },
 }
 
 impl EditPrediction {
+    pub fn from_response(response: predict_edits_v3::PredictEditsResponse) -> Option<Self> {
+        // TODO only allow cloud to return one path
+        let Some(path) = response.edits.first().map(|e| e.path.clone()) else {
+            return None;
+        };
+
+        Some(Self {
+            id: EditPredictionId(response.request_id),
+            path,
+            state: EditPredictionState::Pending {
+                edits: response.edits,
+            },
+        })
+    }
+
     pub fn interpolate(
         &self,
         new_snapshot: &TextBufferSnapshot,
     ) -> Option<Vec<(Range<Anchor>, String)>> {
-        interpolate_edits(&self.snapshot, new_snapshot, self.edits.clone())
+        match &self.state {
+            EditPredictionState::Pending { edits } => {
+                // todo!
+                None
+            }
+            EditPredictionState::Ready {
+                edits, snapshot, ..
+            } => interpolate_edits(&snapshot, new_snapshot, edits.clone()),
+        }
     }
 
     pub fn targets_buffer(&self, buffer: &Entity<Buffer>, cx: &App) -> bool {
         buffer.read(cx).file().map(|p| p.full_path(cx)).as_deref() == Some(self.path.as_ref())
     }
+
+    pub fn targets_buffer_async(&self, buffer: &Entity<Buffer>, cx: &AsyncApp) -> Result<bool> {
+        buffer.read_with(cx, |buffer, cx| {
+            buffer.file().map(|p| p.full_path(cx)).as_deref() == Some(self.path.as_ref())
+        })
+    }
+
+    /// Upgrades edits to anchors
+    pub async fn upgrade(
+        self,
+        old_snapshot: &TextBufferSnapshot,
+        buffer: &Entity<Buffer>,
+        cx: &mut AsyncApp,
+    ) -> Result<Option<Self>> {
+        match self.state {
+            EditPredictionState::Pending { edits } => {
+                // todo! is it worth goingt to the bg here?
+                let edits = cx
+                    .background_spawn({
+                        let old_snapshot = old_snapshot.clone();
+                        async move { edits_from_response(&edits, &old_snapshot) }
+                    })
+                    .await;
+
+                let Some((edits, snapshot, edit_preview_task)) =
+                    buffer.read_with(cx, |buffer, cx| {
+                        let new_snapshot = buffer.snapshot();
+                        let edits: Arc<[_]> =
+                            interpolate_edits(old_snapshot, &new_snapshot, edits)?.into();
+
+                        Some((edits.clone(), new_snapshot, buffer.preview_edits(edits, cx)))
+                    })?
+                else {
+                    return Ok(None);
+                };
+
+                Ok(Some(EditPrediction {
+                    id: self.id,
+                    path: self.path,
+                    state: EditPredictionState::Ready {
+                        edits,
+                        snapshot: snapshot.text,
+                        edit_preview: edit_preview_task.await,
+                    },
+                }))
+            }
+            EditPredictionState::Ready { .. } => Ok(Some(self)),
+        }
+    }
+}
+
+impl std::fmt::Debug for EditPredictionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditPredictionState::Pending { edits } => {
+                f.debug_struct("Pending").field("edits", edits).finish()
+            }
+            EditPredictionState::Ready { edits, .. } => f
+                .debug_struct("Ready")
+                .field("edits", edits)
+                .field("snapshot", &"<snapshot>")
+                .field("edit_preview", &"<edit_preview>")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
 pub struct EditPredictionId(Uuid);
-
-impl From<Uuid> for EditPredictionId {
-    fn from(value: Uuid) -> Self {
-        EditPredictionId(value)
-    }
-}
 
 impl From<EditPredictionId> for gpui::ElementId {
     fn from(value: EditPredictionId) -> Self {
@@ -110,7 +191,7 @@ pub fn interpolate_edits(
 
 pub fn edits_from_response(
     edits: &[predict_edits_v3::Edit],
-    snapshot: &BufferSnapshot,
+    snapshot: &TextBufferSnapshot,
 ) -> Arc<[(Range<Anchor>, String)]> {
     edits
         .iter()
@@ -133,7 +214,7 @@ fn excerpt_edits_from_response(
     old_text: Cow<str>,
     new_text: &str,
     offset: usize,
-    snapshot: &BufferSnapshot,
+    snapshot: &TextBufferSnapshot,
 ) -> impl Iterator<Item = (Range<Anchor>, String)> {
     text_diff(&old_text, new_text)
         .into_iter()
